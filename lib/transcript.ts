@@ -1,42 +1,105 @@
 export interface RecorderHandle {
-  stop: () => void;
+  stop: () => Promise<void>;
 }
 
 export async function startRecording(
   onChunk: (blob: Blob) => void,
-  chunkIntervalMs = 30_000,
+  chunkIntervalMs = 6_000,
 ): Promise<RecorderHandle> {
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
       echoCancellation: true,
       noiseSuppression: true,
-      sampleRate: 16000,
+      sampleRate: 16_000,
     },
   });
 
-  // Pick best supported MIME type
   const mimeType = getSupportedMimeType();
-  const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+  let recorder: MediaRecorder | null = null;
+  let rotationTimer: NodeJS.Timeout | null = null;
+  let isStopping = false;
+  let stopResolver: (() => void) | null = null;
 
-  recorder.ondataavailable = (e) => {
-    if (e.data && e.data.size > 0) {
-      onChunk(e.data);
+  const clearRotationTimer = () => {
+    if (rotationTimer) {
+      clearTimeout(rotationTimer);
+      rotationTimer = null;
     }
   };
 
-  recorder.onerror = (e) => {
-    console.error('MediaRecorder error:', e);
+  const cleanupStream = () => {
+    stream.getTracks().forEach((track) => track.stop());
   };
 
-  recorder.start(chunkIntervalMs);
+  const startSegment = () => {
+    if (isStopping) return;
+
+    const nextRecorder = new MediaRecorder(
+      stream,
+      mimeType ? { mimeType } : undefined,
+    );
+    const parts: BlobPart[] = [];
+
+    nextRecorder.ondataavailable = (event) => {
+      if (event.data && event.data.size > 0) {
+        parts.push(event.data);
+      }
+    };
+
+    nextRecorder.onerror = (event) => {
+      console.error('MediaRecorder error:', event);
+    };
+
+    nextRecorder.onstop = () => {
+      clearRotationTimer();
+
+      if (parts.length > 0) {
+        const blob = new Blob(parts, {
+          type: nextRecorder.mimeType || mimeType || 'audio/webm',
+        });
+
+        if (blob.size > 0) {
+          onChunk(blob);
+        }
+      }
+
+      if (isStopping) {
+        cleanupStream();
+        stopResolver?.();
+        stopResolver = null;
+        return;
+      }
+
+      startSegment();
+    };
+
+    recorder = nextRecorder;
+    nextRecorder.start();
+    rotationTimer = setTimeout(() => {
+      if (nextRecorder.state === 'recording') {
+        nextRecorder.stop();
+      }
+    }, chunkIntervalMs);
+  };
+
+  startSegment();
 
   return {
-    stop: () => {
-      if (recorder.state !== 'inactive') {
+    stop: () =>
+      new Promise<void>((resolve) => {
+        isStopping = true;
+        stopResolver = resolve;
+        clearRotationTimer();
+
+        if (!recorder || recorder.state === 'inactive') {
+          cleanupStream();
+          stopResolver?.();
+          stopResolver = null;
+          return;
+        }
+
         recorder.stop();
-      }
-      stream.getTracks().forEach((t) => t.stop());
-    },
+      }),
   };
 }
 
@@ -47,12 +110,22 @@ function getSupportedMimeType(): string {
     'audio/ogg;codecs=opus',
     'audio/mp4',
   ];
+
   for (const type of types) {
     if (MediaRecorder.isTypeSupported(type)) return type;
   }
+
   return '';
 }
 
-export function blobToFile(blob: Blob, filename = 'audio.webm'): File {
-  return new File([blob], filename, { type: blob.type || 'audio/webm' });
+function getExtensionForMimeType(type: string): string {
+  if (type.includes('ogg')) return 'ogg';
+  if (type.includes('mp4')) return 'mp4';
+  return 'webm';
+}
+
+export function blobToFile(blob: Blob, filename?: string): File {
+  const type = blob.type || 'audio/webm';
+  const resolvedFilename = filename ?? `audio.${getExtensionForMimeType(type)}`;
+  return new File([blob], resolvedFilename, { type });
 }

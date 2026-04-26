@@ -9,6 +9,7 @@ interface TranscriptPanelProps {
   isRecording: boolean;
   isTranscribing: boolean;
   countdown: number;
+  chunkIntervalSeconds: number;
   onToggleMic: () => void;
 }
 
@@ -17,6 +18,7 @@ export default function TranscriptPanel({
   isRecording,
   isTranscribing,
   countdown,
+  chunkIntervalSeconds,
   onToggleMic,
 }: TranscriptPanelProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -27,7 +29,6 @@ export default function TranscriptPanel({
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[#ffffff0d]">
         <div className="flex items-center gap-2">
           <span className="text-[10px] font-mono text-[#55555f] uppercase tracking-widest">
@@ -40,7 +41,7 @@ export default function TranscriptPanel({
         <div className="flex items-center gap-2">
           {isRecording && (
             <span className="text-[10px] font-mono text-[#9090a8]">
-              next chunk in {countdown}s
+              suggestions in {countdown}s
             </span>
           )}
           <span
@@ -55,7 +56,6 @@ export default function TranscriptPanel({
         </div>
       </div>
 
-      {/* Mic controls */}
       <div className="flex items-center gap-3 px-4 py-3 border-b border-[#ffffff0d]">
         <MicButton
           isRecording={isRecording}
@@ -65,13 +65,12 @@ export default function TranscriptPanel({
         <div className="text-xs text-[#55555f]">
           {isRecording
             ? isTranscribing
-              ? 'Transcribing chunk...'
-              : 'Recording — transcript appends every ~30s'
+              ? 'Transcribing latest chunk...'
+              : `Listening live. Transcript updates every ~${chunkIntervalSeconds}s.`
             : 'Click mic to start recording'}
         </div>
       </div>
 
-      {/* Transcript body */}
       <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 scrollbar-none">
         {transcript.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full gap-2 text-center">

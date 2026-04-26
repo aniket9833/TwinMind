@@ -19,7 +19,8 @@ import type {
   ChatMessage,
 } from '@/lib/types';
 
-const REFRESH_INTERVAL = 30;
+const SUGGESTION_INTERVAL = 30;
+const TRANSCRIPT_INTERVAL = 6;
 
 export default function Home() {
   const store = useSessionStore();
@@ -27,6 +28,8 @@ export default function Home() {
   const countdownRef = useRef<NodeJS.Timeout | null>(null);
   const autoRefreshRef = useRef<NodeJS.Timeout | null>(null);
   const startCountdownRef = useRef<(() => void) | null>(null);
+  const processPendingChunksRef = useRef<(() => Promise<void>) | null>(null);
+  const isProcessingChunksRef = useRef(false);
   const pendingChunksRef = useRef<Blob[]>([]);
 
   // Hydrate settings from localStorage on mount
@@ -52,7 +55,7 @@ export default function Home() {
       if (!store.settings.groqApiKey) return;
       store.setTranscribing(true);
       try {
-        const file = blobToFile(blob, 'audio.webm');
+        const file = blobToFile(blob);
         const form = new FormData();
         form.append('audio', file);
 
@@ -81,6 +84,28 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [store.settings.groqApiKey],
   );
+
+  const processPendingChunks = useCallback(async () => {
+    if (isProcessingChunksRef.current) return;
+
+    isProcessingChunksRef.current = true;
+    try {
+      while (pendingChunksRef.current.length > 0) {
+        const blob = pendingChunksRef.current.shift();
+        if (!blob) continue;
+        await transcribeBlob(blob);
+      }
+    } finally {
+      isProcessingChunksRef.current = false;
+      if (pendingChunksRef.current.length > 0) {
+        void processPendingChunksRef.current?.();
+      }
+    }
+  }, [transcribeBlob]);
+
+  useEffect(() => {
+    processPendingChunksRef.current = processPendingChunks;
+  }, [processPendingChunks]);
 
   // ── Suggestions ───────────────────────────────────────────────────────────
 
@@ -138,7 +163,7 @@ export default function Home() {
     if (countdownRef.current) clearInterval(countdownRef.current);
     if (autoRefreshRef.current) clearTimeout(autoRefreshRef.current);
 
-    store.setCountdown(REFRESH_INTERVAL);
+    store.setCountdown(SUGGESTION_INTERVAL);
 
     countdownRef.current = setInterval(() => {
       useSessionStore.setState((s) => ({
@@ -148,16 +173,12 @@ export default function Home() {
 
     autoRefreshRef.current = setTimeout(async () => {
       if (countdownRef.current) clearInterval(countdownRef.current);
-      // Flush any pending audio chunk
-      if (pendingChunksRef.current.length > 0) {
-        const blob = pendingChunksRef.current.shift()!;
-        await transcribeBlob(blob);
-      }
-      await fetchSuggestions();
+      await processPendingChunks();
+      await fetchSuggestions(useSessionStore.getState().transcript);
       startCountdownRef.current?.(); // restart cycle with latest callback
-    }, REFRESH_INTERVAL * 1000);
+    }, SUGGESTION_INTERVAL * 1000);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transcribeBlob, fetchSuggestions]);
+  }, [processPendingChunks, fetchSuggestions]);
 
   useEffect(() => {
     startCountdownRef.current = startCountdown;
@@ -178,17 +199,21 @@ export default function Home() {
 
     if (store.isRecording) {
       // Stop recording
-      recorderRef.current?.stop();
+      const recorder = recorderRef.current;
       recorderRef.current = null;
       store.setRecording(false);
       stopCountdown();
-      store.setCountdown(REFRESH_INTERVAL);
+      store.setCountdown(SUGGESTION_INTERVAL);
+      await recorder?.stop();
+      await processPendingChunks();
+      await fetchSuggestions(useSessionStore.getState().transcript);
     } else {
       // Start recording
       try {
         recorderRef.current = await startRecording((blob) => {
           pendingChunksRef.current.push(blob);
-        }, REFRESH_INTERVAL * 1000);
+          void processPendingChunksRef.current?.();
+        }, TRANSCRIPT_INTERVAL * 1000);
         store.setRecording(true);
         startCountdown();
       } catch (err) {
@@ -200,6 +225,8 @@ export default function Home() {
   }, [
     store.isRecording,
     store.settings.groqApiKey,
+    processPendingChunks,
+    fetchSuggestions,
     startCountdown,
     stopCountdown,
   ]);
@@ -207,7 +234,7 @@ export default function Home() {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      recorderRef.current?.stop();
+      void recorderRef.current?.stop();
       stopCountdown();
     };
   }, [stopCountdown]);
@@ -215,18 +242,14 @@ export default function Home() {
   // ── Manual refresh ────────────────────────────────────────────────────────
 
   const handleManualRefresh = useCallback(async () => {
-    // Flush pending chunk first
-    if (pendingChunksRef.current.length > 0) {
-      const blob = pendingChunksRef.current.shift()!;
-      await transcribeBlob(blob);
-    }
-    await fetchSuggestions();
+    await processPendingChunks();
+    await fetchSuggestions(useSessionStore.getState().transcript);
     if (store.isRecording) {
       stopCountdown();
       startCountdown();
     }
   }, [
-    transcribeBlob,
+    processPendingChunks,
     fetchSuggestions,
     store.isRecording,
     stopCountdown,
@@ -411,7 +434,7 @@ export default function Home() {
           <button
             onClick={() => {
               if (confirm('Clear this session? Recording will stop.')) {
-                recorderRef.current?.stop();
+                void recorderRef.current?.stop();
                 recorderRef.current = null;
                 stopCountdown();
                 store.clearSession();
@@ -469,6 +492,7 @@ export default function Home() {
             isRecording={store.isRecording}
             isTranscribing={store.isTranscribing}
             countdown={store.countdown}
+            chunkIntervalSeconds={TRANSCRIPT_INTERVAL}
             onToggleMic={handleToggleMic}
           />
         </div>
